@@ -78,6 +78,34 @@ static DEFAULT_CHROMATIC_ABERRATION_LUT_DATA: [u8; 12] =
 /// Currently, this only consists of chromatic aberration.
 pub struct PostProcessingPlugin;
 
+
+/// GPU pipeline data for the built-in postprocessing stack.
+///
+/// This is stored in the render world.
+#[derive(Resource)]
+pub struct PostProcessingPipeline {
+    /// The layout of bind group 0, containing the source, LUT, and settings.
+    bind_group_layout: BindGroupLayout,
+    /// Specifies how to sample the source framebuffer texture.
+    source_sampler: Sampler,
+    /// Specifies how to sample the chromatic aberration gradient.
+    chromatic_aberration_lut_sampler: Sampler,
+}
+
+/// A key that uniquely identifies a built-in postprocessing pipeline.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PostProcessingPipelineKey {
+    /// The format of the source and destination textures.
+    texture_format: TextureFormat,
+}
+
+/// A component attached to cameras in the render world that stores the
+/// specialized pipeline ID for the built-in postprocessing stack.
+#[derive(Component, Deref, DerefMut)]
+pub struct PostProcessingPipelineId(CachedRenderPipelineId);
+
+
+
 /// Adds colored fringes to the edges of objects in the scene.
 ///
 /// [Chromatic aberration] simulates the effect when lenses fail to focus all
@@ -123,31 +151,6 @@ pub struct ChromaticAberration {
     pub max_samples: u32,
 }
 
-/// GPU pipeline data for the built-in postprocessing stack.
-///
-/// This is stored in the render world.
-#[derive(Resource)]
-pub struct PostProcessingPipeline {
-    /// The layout of bind group 0, containing the source, LUT, and settings.
-    bind_group_layout: BindGroupLayout,
-    /// Specifies how to sample the source framebuffer texture.
-    source_sampler: Sampler,
-    /// Specifies how to sample the chromatic aberration gradient.
-    chromatic_aberration_lut_sampler: Sampler,
-}
-
-/// A key that uniquely identifies a built-in postprocessing pipeline.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PostProcessingPipelineKey {
-    /// The format of the source and destination textures.
-    texture_format: TextureFormat,
-}
-
-/// A component attached to cameras in the render world that stores the
-/// specialized pipeline ID for the built-in postprocessing stack.
-#[derive(Component, Deref, DerefMut)]
-pub struct PostProcessingPipelineId(CachedRenderPipelineId);
-
 /// The on-GPU version of the [`ChromaticAberration`] settings.
 ///
 /// See the documentation for [`ChromaticAberration`] for more information on
@@ -165,11 +168,39 @@ pub struct ChromaticAberrationUniform {
     unused_2: u32,
 }
 
-/// A resource, part of the render world, that stores the
-/// [`ChromaticAberrationUniform`]s for each view.
+
+
+/// Transforms all objects in scene from current RGB values to Monochrome
+/// 
+/// The default setting is Greyscale
+/// Other settings will apply a hue to the resulting greyscale, or use alternate conversion multipliers as needed.
+#[derive(Reflect, Component, Clone)]
+#[reflect(Component, Default)]
+pub struct Monochrome {
+    /// Intensity scale controls the final image - 
+    /// The default value of 0 keeps it as is, negative will shift it towards black, while positive shifts to white
+    pub intensity: f32,
+
+    /// This setting is a placeholder for the hue-modification - will be more of a enum type later.
+    pub hue: u32,
+}
+
+/// The on-GPU version of [`Monochrome`] settings.
+#[derive(ShaderType)]
+pub struct MonochromeUniform {
+    intensity: f32,
+    hue: u32,
+    // Padding data. Will determine later if this is needed or not
+    unused_1: u32,
+    unused_2: u32,
+}
+
+/// A resource, part of the render world, that stores the **Uniforms for each view
 #[derive(Resource, Deref, DerefMut, Default)]
 pub struct PostProcessingUniformBuffers {
+    #[deref]    // TODO - Figure out the Deref aspect here - because I think I do want to expand this resource.
     chromatic_aberration: DynamicUniformBuffer<ChromaticAberrationUniform>,
+    monochrome: DynamicUniformBuffer<MonochromeUniform>,
 }
 
 /// A component, part of the render world, that stores the appropriate byte
@@ -270,6 +301,15 @@ impl Default for ChromaticAberration {
             color_lut: DEFAULT_CHROMATIC_ABERRATION_LUT_HANDLE,
             intensity: DEFAULT_CHROMATIC_ABERRATION_INTENSITY,
             max_samples: DEFAULT_CHROMATIC_ABERRATION_MAX_SAMPLES,
+        }
+    }
+}
+
+impl Default for Monochrome {
+    fn default() -> Self {
+        Self{
+            intensity: 0.0,
+            hue: 0,
         }
     }
 }
@@ -468,6 +508,11 @@ pub fn prepare_post_processing_uniforms(
     post_processing_uniform_buffers.clear();
 
     // Gather up all the postprocessing settings.
+
+    // TODO - Modify this so we repeat this process for all relevant shaders
+    // Basically adds more queries? Or is there a better way to arrange this kind of logic...
+    // Since each shader would need to worry about it's own uniform, unless they all share the same settings.
+    // Not sure how viable making them all share the same settings is, but 4 fields might be sufficient. 
     for (view_entity, chromatic_aberration) in views.iter_mut() {
         let chromatic_aberration_uniform_buffer_offset =
             post_processing_uniform_buffers.push(&ChromaticAberrationUniform {
@@ -503,5 +548,18 @@ impl ExtractComponent for ChromaticAberration {
         } else {
             None
         }
+    }
+}
+
+impl ExtractComponent for Monochrome {
+    type QueryData = Read<Monochrome>;
+    type QueryFilter = With<Camera>;
+    type Out = Monochrome;
+
+    fn extract_component(
+        monochrome: QueryItem<'_, Self::QueryData>
+    ) -> Option<Self::Out> {
+        // Add skip options for certain configurations if needed
+        Some(monochrome.clone())
     }
 }
